@@ -1,0 +1,134 @@
+import torch
+from ultralytics import YOLO
+import cv2
+import cvzone
+from collections import defaultdict
+
+# Force Torch to use CPU only
+torch.cuda.is_available = lambda: False
+
+# Load YOLOv8 model
+model = YOLO('.venv/yolo-Weight/yolov8n.pt')
+model.to('cpu')
+
+# Load video
+cap = cv2.VideoCapture("videos/expway.mp4")
+
+# COCO class names
+className = ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck", "boat", "traffic light",
+             "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+             "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+             "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+             "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+             "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "sofa",
+             "pottedplant", "bed", "diningtable", "toilet", "tvmonitor", "laptop", "mouse", "remote", "keyboard",
+             "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+             "scissors", "teddy bear", "hair drier", "toothbrush", "ambulance"]
+
+# Object tracking memory
+center_points = defaultdict(list)
+incoming = 0
+outgoing = 0
+
+crossed_ids_in = set()
+crossed_ids_out = set()
+
+# Get video frame width
+_, temp_img = cap.read()
+width = temp_img.shape[1] if temp_img is not None else 1280
+height = temp_img.shape[0] if temp_img is not None else 720
+half_width = width // 2
+
+# Incoming lines (right half - 4 yellow lines)
+incoming_lines = [
+    (800, 800),
+    (830, 830),
+    (860, 860),
+    (890, 890)
+]
+
+# Outgoing lines (left half - 4 red lines)
+outgoing_lines = [
+    (600, 800),
+    (630, 830),
+    (660, 860),
+    (690, 890)
+]
+
+while True:
+    success, img = cap.read()
+    if not success or img is None:
+        break
+
+    # Draw all 4 incoming lines (yellow)
+    for y_left, y_right in incoming_lines:
+        cv2.line(img, (half_width, y_left), (width, y_right), (0, 255, 255), 1)
+
+    # Draw all 4 outgoing lines (red)
+    for y_left, y_right in outgoing_lines:
+        cv2.line(img, (0, y_left), (half_width, y_right), (0, 0, 255), 1)
+
+    # Run detection
+    results = model.track(img, persist=True, conf=0.5)
+
+    if results and results[0].boxes:
+        for box in results[0].boxes:
+            cls = int(box.cls[0])
+            if className[cls] == "car":
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                w, h = x2 - x1, y2 - y1
+                cx, cy = x1 + w // 2, y1 + h // 2
+
+                track_id = int(box.id[0]) if box.id is not None else None
+                if track_id is not None:
+                    center_points[track_id].append((cx, cy))
+
+                    y_in_lines = []
+                    if cx >= half_width:
+                        for y_left, y_right in incoming_lines:
+                            y_in = int(y_left + (y_right - y_left) * ((cx - half_width) / (width - half_width)))
+                            y_in_lines.append(y_in)
+
+                    y_out_lines = []
+                    if cx <= half_width:
+                        for y_left, y_right in outgoing_lines:
+                            y_out = int(y_left + (y_right - y_left) * (cx / half_width))
+                            y_out_lines.append(y_out)
+
+                    if len(center_points[track_id]) >= 2:
+                        _, prev_cy = center_points[track_id][-2]
+
+                        # Incoming detection
+                        if track_id not in crossed_ids_in and y_in_lines:
+                            for y_in in y_in_lines:
+                                if prev_cy < y_in <= cy:
+                                    incoming += 1
+                                    crossed_ids_in.add(track_id)
+                                    break
+
+                        # Outgoing detection
+                        if track_id not in crossed_ids_out and y_out_lines:
+                            for y_out in y_out_lines:
+                                if prev_cy > y_out >= cy:
+                                    outgoing += 1
+                                    crossed_ids_out.add(track_id)
+                                    break
+
+                # Draw bounding box and ID
+                cvzone.cornerRect(img, (x1, y1, w, h), l=9)
+                cvzone.putTextRect(img, f'Car ID:{track_id}', (x1, y1 - 20), scale=2, thickness=2)
+                cv2.circle(img, (cx, cy), 5, (0, 0, 255), -1)
+
+    # Draw count boxes
+    cv2.rectangle(img, (20, 20), (420, 90), (0, 200, 0), -1)
+    cv2.putText(img, f'Incoming Cars: {incoming}', (30, 70), cv2.FONT_HERSHEY_SIMPLEX, 1.25, (255, 255, 255), 2)
+
+    cv2.rectangle(img, (20, 100), (420, 170), (0, 0, 200), -1)
+    cv2.putText(img, f'Outgoing Cars: {outgoing}', (30, 150), cv2.FONT_HERSHEY_SIMPLEX, 1.25, (255, 255, 255), 2)
+
+    cv2.imshow("Car Counter", img)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
